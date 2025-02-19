@@ -1,0 +1,103 @@
+pipeline {
+    agent any
+    tools {
+        jdk 'jdk17'
+        nodejs 'node16'
+    }
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main', url: 'https://github.com/srikanth9866/Netflix_Project.git'
+            }
+        }
+        stage("Sonarqube Analysis") {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Netflix \
+                    -Dsonar.projectKey=Netflix1 '''
+                }
+            }
+        }
+        stage("Quality Gate") {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token'
+                }
+            }
+        }
+        stage('Install Dependencies') {
+            steps {
+                sh "npm install"
+            }
+        }
+        stage('OWASP FS SCAN') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        stage('TRIVY FS SCAN') {
+            steps {
+                sh "trivy fs . > trivyfs.txt"
+            }
+        }
+        stage("Read API Key") {
+            steps {
+                script {
+                    // Use Jenkins credentials to retrieve the API key
+                    withCredentials([string(credentialsId: 'yourapikey-credential-id', variable: 'TMDB_V3_API_KEY')]) {
+                        echo "API Key: ${env.TMDB_V3_API_KEY}"
+                    }
+                }
+            }
+        }
+        stage("Docker Build & Push") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                        // Use the API key from Jenkins credentials
+                        withCredentials([string(credentialsId: 'yourapikey-credential-id', variable: 'TMDB_V3_API_KEY')]) {
+                            // Build the Docker image
+                            sh "docker build --build-arg TMDB_V3_API_KEY=${env.TMDB_V3_API_KEY} -t netflix ."
+                            
+                            // Tag the Docker image for the new repository
+                            sh "docker tag netflix srikanth0370/netflix:latest"
+                            
+                            // Push the Docker image to the new repository
+                            sh "docker push srikanth0370/netflix:latest"
+                        }
+                    }
+                }
+            }
+        }
+        stage("TRIVY Image Scan") {
+            steps {
+                sh "trivy image srikanth0370/netflix:latest > trivyimage.txt"
+            }
+        }
+        stage('Deploy to Container') {
+            steps {
+                sh 'docker run -d --name netflix -p 8081:80 srikanth0370/netflix:latest'
+            }
+        }
+    }
+    post {
+        always {
+            emailext attachLog: true,
+            subject: "${currentBuild.result}",
+            body: "Project: ${env.JOB_NAME}<br/>" +
+                  "Build Number: ${env.BUILD_NUMBER}<br/>" +
+                  "URL: ${env.BUILD_URL}<br/>",
+            to: 'karresrikanth0370@gmail.com',
+            attachmentsPattern: 'trivyfs.txt,trivyimage.txt'
+        }
+    }
+}
